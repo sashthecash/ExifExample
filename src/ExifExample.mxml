@@ -1,0 +1,184 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+Adobe Systems Incorporated(r) Source Code License Agreement
+Copyright(c) 2011 Adobe Systems Incorporated. All rights reserved.
+
+Please read this Source Code License Agreement carefully before using
+the source code.
+
+Adobe Systems Incorporated grants to you a perpetual, worldwide, non-exclusive, 
+no-charge, royalty-free, irrevocable copyright license, to reproduce,
+prepare derivative works of, publicly display, publicly perform, and
+distribute this source code and such derivative works in source or 
+object code form without any attribution requirements.  
+
+The name "Adobe Systems Incorporated" must not be used to endorse or promote products
+derived from the source code without prior written permission.
+
+You agree to indemnify, hold harmless and defend Adobe Systems Incorporated from and
+against any loss, damage, claims or lawsuits, including attorney's 
+fees that arise or result from your use or distribution of the source 
+code.
+
+THIS SOURCE CODE IS PROVIDED "AS IS" AND "WITH ALL FAULTS", WITHOUT 
+ANY TECHNICAL SUPPORT OR ANY EXPRESSED OR IMPLIED WARRANTIES, INCLUDING,
+BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  ALSO, THERE IS NO WARRANTY OF 
+NON-INFRINGEMENT, TITLE OR QUIET ENJOYMENT.  IN NO EVENT SHALL MACROMEDIA
+OR ITS SUPPLIERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOURCE CODE, EVEN IF
+ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+-->
+
+<s:Application xmlns:fx="http://ns.adobe.com/mxml/2009" 
+			   xmlns:s="library://ns.adobe.com/flex/spark">
+	<fx:Script>
+		<![CDATA[
+			import jp.shichiseki.exif.ExifInfo;
+			import jp.shichiseki.exif.IFD;
+			
+			import mx.collections.ArrayCollection;
+			
+			private var exifBytes:ByteArray;
+			private var mediaPromise:MediaPromise;
+			
+			private function onTakePhoto(e:MouseEvent):void
+			{
+				var cameraUI:CameraUI = new CameraUI();
+				cameraUI.addEventListener(MediaEvent.COMPLETE, onPhotoComplete);
+				cameraUI.launch(MediaType.IMAGE);
+			}
+
+			private function onBrowseForPhoto(e:MouseEvent):void
+			{
+				if (CameraRoll.supportsBrowseForImage) // Device support.
+				{
+					var crOpts:CameraRollBrowseOptions = new CameraRollBrowseOptions();
+					crOpts.height = this.stage.stageHeight / 3;
+					crOpts.width = this.stage.stageWidth / 3;
+					crOpts.origin = new Rectangle(e.target.x, e.target.y, e.target.width, e.target.height);
+					var cr:CameraRoll = new CameraRoll();
+					cr.addEventListener(MediaEvent.SELECT, onPhotoComplete);
+					cr.browseForImage(crOpts);
+				}
+				else // Desktop support for testing.
+				{
+					var picDir:File;
+					if (File.userDirectory.resolvePath("Pictures").exists)
+					{
+						picDir = File.userDirectory.resolvePath("Pictures");
+					}
+					else if (File.userDirectory.resolvePath("My Pictures").exists)
+					{
+						picDir = File.userDirectory.resolvePath("My Pictures");
+					}
+					else
+					{
+						picDir = File.userDirectory;
+					}
+					picDir.addEventListener(Event.SELECT, onImageSelected);
+					picDir.browseForOpen("Choose a picture", [new FileFilter("JPEGs", "*.jpg;*.jpeg")]);
+				}
+			}
+			
+			private function onImageSelected(e:Event):void
+			{
+				var pic:File = e.target as File;
+				pic.removeEventListener(Event.SELECT, onImageSelected);
+				var fs:FileStream = new FileStream();
+				fs.open(pic, FileMode.READ);
+				var eb:ByteArray = this.getExifBytes(fs);
+				fs.close();
+				this.parse(eb);
+			}
+			
+			private function onPhotoComplete(e:MediaEvent):void
+			{
+				var cameraRollOrCameraUI:EventDispatcher = e.target as EventDispatcher;
+				cameraRollOrCameraUI.removeEventListener(MediaEvent.COMPLETE, onPhotoComplete);
+				this.mediaPromise = e.data;
+				if (this.mediaPromise.isAsync)
+				{
+					var mediaDispatcher:IEventDispatcher = this.mediaPromise.open() as IEventDispatcher;
+					this.exifBytes = new ByteArray();
+					mediaDispatcher.addEventListener(ProgressEvent.PROGRESS, onMediaPromiseProgress);
+				}
+				else
+				{
+					var input:IDataInput = this.mediaPromise.open();
+					var eb:ByteArray = this.getExifBytes(input);
+					this.mediaPromise.close();
+					this.parse(eb);
+				}
+			}
+
+			private function onMediaPromiseProgress(e:ProgressEvent):void
+			{
+				var input:IDataInput = e.target as IDataInput;
+				input.readBytes(this.exifBytes, this.exifBytes.length, input.bytesAvailable);
+				if (this.exifBytes.length >= (64*1024))
+				{
+					IEventDispatcher(e.target).removeEventListener(ProgressEvent.PROGRESS, onMediaPromiseProgress);
+					this.mediaPromise.close();
+					this.parse(this.exifBytes);
+				}
+			}
+
+			private function getExifBytes(input:IDataInput):ByteArray
+			{
+				var eb:ByteArray = new ByteArray();
+				input.readBytes(eb, 0, 64*1024);
+				return eb;
+			}
+			
+			private function parse(eb:ByteArray):void
+			{
+				var exifInfo:ExifInfo = new ExifInfo(eb);
+				if (exifInfo.ifds.thumbnail)
+				{
+					var thumbnailLoader:Loader = new Loader();
+					var complete:Function = function(e:Event):void
+					{
+						thumbnailLoader.contentLoaderInfo.removeEventListener(Event.COMPLETE, complete);
+						imageDisplay.width = thumbnailLoader.contentLoaderInfo.width;
+						imageDisplay.height = thumbnailLoader.contentLoaderInfo.height;
+						imageDisplay.source = thumbnailLoader;
+					};
+					thumbnailLoader.contentLoaderInfo.addEventListener(Event.COMPLETE, complete);
+					thumbnailLoader.loadBytes(exifInfo.thumbnailData);
+					
+				}
+				var exifData:ArrayCollection = new ArrayCollection();
+				this.iterateTags(exifInfo.ifds.primary, exifData);
+				this.iterateTags(exifInfo.ifds.exif, exifData);
+				this.iterateTags(exifInfo.ifds.gps, exifData);
+				this.iterateTags(exifInfo.ifds.interoperability, exifData);
+				this.iterateTags(exifInfo.ifds.thumbnail, exifData);
+				this.exifList.dataProvider = exifData;
+			}
+			
+			private function iterateTags(ifd:IFD, exifData:ArrayCollection):void
+			{
+				if (!ifd) return;
+				for (var entry:String in ifd)
+				{
+					if (entry == "MakerNote") continue;
+					exifData.addItem(entry + ": " + ifd[entry]);
+				}
+			}
+		]]>
+	</fx:Script>
+	<s:VGroup width="100%" height="100%" horizontalAlign="center">
+		<s:Image id="imageDisplay" />
+		<s:List id="exifList" width="100%" height="100%"/>
+		<s:HGroup width="100%" horizontalAlign="center" paddingBottom="5" paddingTop="5">
+			<s:Button label="Take Photo" click="onTakePhoto(event);"/>
+			<s:Button label="Browse for Photo" click="onBrowseForPhoto(event);"/>
+		</s:HGroup>
+	</s:VGroup>
+</s:Application>
